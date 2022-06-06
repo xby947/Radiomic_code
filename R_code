@@ -1,0 +1,247 @@
+#1. load library#### 
+library(dplyr)
+library(readxl)
+library(na.tools)
+library(caret)
+library(openxlsx)
+library("glmnet")
+library(pROC)
+library(xgboost)
+library(Matrix)
+library(dplyr)
+library(Boruta)
+library(randomForestSRC)
+library(rms)
+rm(list = ls())
+memory.limit(102400)
+memory.size()
+ls()
+
+confint.geeglm <- function(object, parm, level = 0.95, ...) {
+  cc <- coef(summary(object))
+  mult <- qnorm((1+level)/2)
+  citab <- with(as.data.frame(cc),
+                cbind(lwr=Estimate-mult*Std.err,
+                      upr=Estimate+mult*Std.err))
+  rownames(citab) <- rownames(cc)
+  citab[parm,]
+}
+#2. Read Radiomic Data####
+# Load Radiomic Data
+setwd("D:\\Radiomics_study\\install_yuyang\\pumc\\DEC_26")
+develop<-read.csv("developcsv_364_withcannon_1.csv")
+validation<-read.csv("validation_143_csv.csv") 
+
+#3. DATA Tidying####
+# Data Tidying based on CustomLabel
+radiomics_end_index <- length(develop)
+radiomics_full <- develop
+radiomics_full_v<-validation
+Feature_full<-develop[17:length(develop)]
+Feature_full_v<-validation[17:length(validation)]
+Feature_full_v[1,0:2]
+#4. Extract Features####
+
+
+Features_develop <- Feature_full[1:length(Feature_full)]
+Features_validation <- Feature_full_v[1:length(Feature_full_v)]
+
+Labels <- as.factor(radiomics_full$Label)
+Labels_v <- as.factor(radiomics_full_v$Label)
+id_v<-validation$PatientID
+id_d<-develop$PatientID
+which_na(develop)
+which_na(validation)
+data_Develop_ori <- cbind(Labels, Features_develop)
+data_Develop_ori_full <- cbind(id_d,Labels, Features_develop)
+
+data_validation_ori <- cbind(Labels_v, Features_validation)
+data_validation_ori_full <- cbind(id_v,Labels_v, Features_validation)
+
+total_deve_id<-data.frame(unique(data_Develop_ori_full$id_d))
+sized1= round(0.7*length(total_deve_id[,1]))
+sized2=length(total_deve_id[,1])-sized1
+
+#5. Boruta+RandomForest####
+library(caret)
+library(openxlsx)
+library("glmnet")
+library(pROC)
+library(xgboost)
+library(Matrix)
+library(dplyr)
+library(Boruta)
+
+
+currtree <- 3
+currsize <- 5
+currdepth <- 2
+group <- 60
+cboruta <- 1544
+currsplit <- 185
+
+
+set.seed(csplit)
+train_split_id<-sample(total_deve_id[,1], sized1, replace = FALSE, prob = NULL)
+train_full<-data_Develop_ori_full[which(data_Develop_ori_full$id_d %in% train_split_id),]
+train_feature<-train_full[5:length(train_full)]
+y_train <- as.numeric(train_full$Labels)
+y_train <- train_full$Labels
+train_feature_full<-cbind(y_train,train_feature)
+test_full<-data_Develop_ori_full[-which(data_Develop_ori_full$id_d %in% train_split_id),]
+test_feature<-test_full[5:length(test_full)]
+y_test <- as.numeric(test_full$Labels)
+y_test <- test_full$Labels
+     
+test_feature_full<-cbind(y_test,test_feature)
+y_validation <-as.numeric(data_validation_ori_full$Labels_v)
+y_validation<-data_validation_ori_full$Labels_v
+set.seed(cboruta)
+boruta_train <- Boruta(y_train~., data = train_feature, doTrace = 0,maxRuns=15)
+boruta_df <- attStats(boruta_train)
+boruta_features<-boruta_df[order(abs(boruta_df$meanImp),decreasing=TRUE)[1:200],]
+
+Selected_Features_train <-train_feature %>%dplyr:::select(rownames(boruta_features))
+Selected_Features_test <-test_feature %>%dplyr:::select(rownames(boruta_features))
+Selected_Features_v <- Features_validation%>% dplyr:::select(rownames(boruta_features))
+
+SELECTDATA_validation <- cbind(y_validation, Selected_Features_v)
+SELECTDATA_train <- cbind(y_train, Selected_Features_train)
+SELECTDATA_test <- cbind(y_test, Selected_Features_test)
+
+
+library(randomForestSRC)
+
+set.seed(group)
+
+rf <- rfsrc(y_train~ ., data =SELECTDATA_train, ntree=bestparam$currtree, nodesize=bestparam$currsize,nodedepth = bestparam$currdepth,importance  = TRUE)
+rf$predicted
+rf$class
+summary <- data.frame(currsplit,cboruta,group, currtree,currsize,currdepth,train_result,test_result)
+bestparam<-summary
+
+
+#6. Applying Boruta+RandomForest####
+#read bestparameter
+Selected_Features_v <- Features_validation%>% dplyr:::select(rownames(boruta_features))
+
+SELECTDATA_validation <- cbind(y_validation, Selected_Features_v)
+SELECTDATA_train <- cbind(y_train, Selected_Features_train)
+SELECTDATA_test <- cbind(y_test, Selected_Features_test)
+
+set.seed(bestparam$group)
+rf <- rfsrc(y_train~ ., data =SELECTDATA_train, ntree=bestparam$currtree, nodesize=bestparam$currsize,nodedepth = bestparam$currdepth,importance  = TRUE)
+
+library(ggRandomForests)
+gg0 <- gg_vimp(rf)
+gg<-gg0[gg0$vimp!=0,]
+gg<-gg[gg$set=="all",]
+plot(gg)
+
+gg$abs<-abs(gg$vimp)
+order_gg0<-arrange(gg,-abs)
+top<-order_gg0
+top
+
+train_class <- predict.rfsrc(rf,SELECTDATA_train)$predicted[,1]
+test_class <- predict.rfsrc(rf,SELECTDATA_test)$predicted[,1]
+validation_class <- predict.rfsrc(rf,SELECTDATA_validation)$predicted[,1]
+
+library("pROC")
+Train_roc_data <- data.frame(y_train,train_class)
+names(Train_roc_data)<- c("y_train", "rfsrc_pred")
+rocobj_train <-roc(Train_roc_data$y_train, Train_roc_data$rfsrc_pred)
+print("Training Dataset")
+rocobj_train$auc
+# summ<-coords (rocobj_train, ret=c ("threshold",  "specificity",  "sensitivity",  "accuracy","precision","recall","ppv","npv"),transpose = TRUE)
+# summ2<-coords (rocobj_test, ret=c ("threshold",  "specificity",  "sensitivity",  "accuracy","precision","recall","ppv","npv"),transpose = TRUE)
+# summ3<-coords (rocobj_validation, ret=c ("threshold",  "specificity",  "sensitivity",  "accuracy","precision","recall","ppv","npv"),transpose = TRUE)
+ci.auc(rocobj_train)##CI
+roc_summary_train <-coords (rocobj_train,
+                            "best"
+                            , ret=c ("threshold",  "specificity",  "sensitivity",  "accuracy","precision","recall","ppv","npv"),transpose = TRUE)
+roc_summary_train
+
+
+# Test roc data 
+library("pROC")
+Test_roc_data <- data.frame(y_test,test_class)
+names(Test_roc_data)<- c("y_test", "rfsrc_pred_test")
+rocobj_test <- roc(Test_roc_data[,1], Test_roc_data[,2])
+print("Testing Dataset")
+
+rocobj_test$auc
+ci.auc (rocobj_test)##CI
+roc_summary_test<-coords (rocobj_test,roc_summary_train[1], ret=c ("threshold",  "specificity",  "sensitivity",  "accuracy","precision","recall","ppv","npv"),transpose = TRUE)
+
+roc.test (rocobj_train,  rocobj_test, method= "delong")                                                                        
+roc_summary_test 
+# Validation roc data 
+library("pROC")
+Validation_roc_data <- data.frame(y_validation,validation_class)
+names(Validation_roc_data)<- c("y_validation", "rfsrc_pred_validation")
+rocobj_validation <- roc(Validation_roc_data$y_validation, Validation_roc_data$rfsrc_pred_validation)
+print("Validation Dataset")
+#7. Radiomic ROC #####
+# setwd("D:\\Radiomics_study\\install_yuyang\\pumc\\DEC_26\\NEW\\clinical\\result_useful\\ROC")
+
+library(ggplot2)
+Radiomic_roc<-ggroc(list(Training = rocobj_train,Testing = rocobj_test, Validation=rocobj_validation), aes = c("colour"), size=1,legacy.axes = TRUE) +
+  scale_color_discrete(labels = c( 
+    paste("Training AUC", round(rocobj_train$auc,2)),
+    paste("Testing AUC", round(rocobj_test$auc,2)),
+    paste("Validation AUC",round(rocobj_validation$auc,2)))) +
+  ggtitle("Radiomics Model ROC") +
+  theme_classic()
+Radiomic_roc
+ggsave(Radiomic_roc, file='Radiomic ROC.pdf', width=8, height=6) 
+bestparam
+
+
+# based on vessels clinical_all
+setwd("D:\\Radiomics_study\\install_yuyang\\pumc\\FEB\\pumc\\DEC_26\\NEW")
+clincial_all <- read.csv("clinical_all.csv",stringsAsFactors = T)
+
+Label<-clincial_all$Label
+group<-clincial_all$group
+clincial_all<-cbind(clincial_all[1:17],group,Label)
+clincial_all$CTAlabel<-function_ctatransfer(clincial_all$CTA)
+clincial_all$cFFRlabel<-function_cffrtransfer(clincial_all$cFFR)
+
+develop_clincial<-clincial_all[which(clincial_all$group<2),]
+vali_clincial<-clincial_all[which(clincial_all$group>=2),]
+
+clinical_train<-develop_clincial[which(develop_clincial$PatientID %in% train_split_id),]
+clinical_test<-develop_clincial[-which(develop_clincial$PatientID %in% train_split_id),]
+clinical_vali<-vali_clincial
+
+clinical_train<-cbind(clinical_train,train_class)
+colnames(clinical_train)[ colnames(clinical_train) %in% c('train_class') ] <- c('rfscore')
+clinical_test<-cbind(clinical_test,test_class)
+colnames(clinical_test)[ colnames(clinical_test) %in% c('test_class') ] <- c('rfscore')
+clinical_vali<-cbind(clinical_vali,validation_class)
+colnames(clinical_vali)[ colnames(clinical_vali) %in% c('validation_class') ] <- c('rfscore')
+
+clinical_develop2<-rbind(clinical_train,clinical_test)#develop data
+clinical_all2<-rbind(clinical_train,clinical_test,clinical_vali)#validation data
+
+#8.GEE####
+library(geepack)
+data=clinical_develop2
+n=length(data)
+result3<-c()
+for (i in 4:n){
+  fit<-geeglm(Label~data[,i],id=PatientID ,data=clinical_develop2,corstr = 'exchangeable',family = 'binomial')
+  bb<-exp(confint(fit))
+  result3<-rbind(result3,c(colnames(data)[i],coef(summary(fit))[2,c(1,2,4)],exp(coef(fit))[c(2)],bb[2,]))
+}
+print("UniVariable")
+result3
+fit4 <- geeglm(Label~CACS+Diabete+CTAlabel+cFFRlabel+rfscore,id=PatientID ,
+               data=clinical_develop2,corstr = 'independence',family = 'binomial')
+a<-summary(fit4)$coefficients
+b<-exp(cbind("OR"=coef(fit4),confint(fit4)))
+cbind(a,b)
+write.csv(cbind(a,b),"multivariate_result_gee.csv")
+library(car)
+vif_combined<-vif(fit4)
